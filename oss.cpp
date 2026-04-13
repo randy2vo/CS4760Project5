@@ -1,19 +1,20 @@
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <queue>
 #include <vector>
+#include <cstdlib>
+#include <cstring>
+#include <cerrno>
+#include <csignal>
+#include <cstdarg>
+#include <cstdio>
+#include <ctime>
 #include <unistd.h>
-#include <sys/wait.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/msg.h>
-#include <cstdlib>
-#include <cerrno>
-#include <cstring>
-#include <csignal>
-#include <cstdio>
-#include <cstdarg>
-#include <ctime>
+#include <sys/wait.h>
 #include "shared.h"
 
 using namespace std;
@@ -23,39 +24,22 @@ static int g_msgid = -1;
 static SimClock* g_clk = nullptr;
 static PCB g_table[TABLE_SIZE];
 static FILE* g_logFile = nullptr;
-
-static queue<int> readyQueue;
-
+static int g_totalResources[NUM_RESOURCES];
+static int g_available[NUM_RESOURCES];
 static int g_logLines = 0;
-static const int LOG_LIMIT = 10000;
 
-// statistics
-static unsigned long long g_totalBusyTime = 0;      // time used by workers
-static unsigned long long g_totalOverheadTime = 0;  // oss overhead time
+static int totalLaunched = 0;
+static int activeChildren = 0;
+static int nextLocalPid = 1;
 
-static void logBoth(const char* fmt, ...) {
-    if (g_logLines >= LOG_LIMIT) return;
+static int totalRequests = 0;
+static int grantedImmediately = 0;
+static int deadlockRuns = 0;
+static int deadlockKills = 0;
 
-    va_list args1, args2;
-    va_start(args1, fmt);
-    va_copy(args2, args1);
+static bool verbose = true;
 
-    vprintf(fmt, args1);
-    fflush(stdout);
-
-    if (g_logFile) {
-        vfprintf(g_logFile, fmt, args2);
-        fflush(g_logFile);
-    }
-
-    va_end(args2);
-    va_end(args1);
-    g_logLines++;
-}
-
-static void addToClock(unsigned int addNS) {
-    if (!g_clk) return;
-
+static void addTime(unsigned int addNS) {
     g_clk->nanoseconds += addNS;
     while (g_clk->nanoseconds >= BILLION) {
         g_clk->seconds++;
@@ -63,35 +47,75 @@ static void addToClock(unsigned int addNS) {
     }
 }
 
-static void addOverhead(unsigned int ns) {
-    addToClock(ns);
-    g_totalOverheadTime += ns;
+static bool reachedTime(unsigned int s, unsigned int ns,
+                        unsigned int ts, unsigned int tns) {
+    return (s > ts) || (s == ts && ns >= tns);
 }
 
-static bool timeGTE(unsigned int sA, unsigned int nA,
-                    unsigned int sB, unsigned int nB) {
-    return (sA > sB) || (sA == sB && nA >= nB);
+static void logBoth(const char* fmt, ...) {
+    va_list a1, a2;
+    va_start(a1, fmt);
+    va_copy(a2, a1);
+
+    vprintf(fmt, a1);
+    fflush(stdout);
+
+    if (g_logFile && g_logLines < 10000) {
+        vfprintf(g_logFile, fmt, a2);
+        fflush(g_logFile);
+        g_logLines++;
+    }
+
+    va_end(a2);
+    va_end(a1);
 }
 
-static long long nanosBetween(unsigned int s1, unsigned int n1,
-                              unsigned int s2, unsigned int n2) {
-    return (long long)(s2 - s1) * 1000000000LL + (long long)n2 - (long long)n1;
+static void cleanup() {
+    if (g_msgid != -1) {
+        msgctl(g_msgid, IPC_RMID, nullptr);
+        g_msgid = -1;
+    }
+    if (g_clk && g_clk != (SimClock*)-1) {
+        shmdt(g_clk);
+        g_clk = nullptr;
+    }
+    if (g_shmid != -1) {
+        shmctl(g_shmid, IPC_RMID, nullptr);
+        g_shmid = -1;
+    }
+    if (g_logFile) {
+        fclose(g_logFile);
+        g_logFile = nullptr;
+    }
 }
 
-static void addTimeToPair(unsigned int baseS, unsigned int baseNS,
-                          unsigned int addNS,
-                          unsigned int& outS, unsigned int& outNS) {
-    unsigned long long total = (unsigned long long)baseNS + addNS;
-    outS = baseS + (unsigned int)(total / BILLION);
-    outNS = (unsigned int)(total % BILLION);
+static void releaseAllResources(int i) {
+    for (int r = 0; r < NUM_RESOURCES; r++) {
+        g_available[r] += g_table[i].resourcesAllocated[r];
+        g_table[i].resourcesAllocated[r] = 0;
+    }
 }
 
-static void addServiceTime(PCB& p, unsigned int usedNS) {
-    unsigned long long total =
-        (unsigned long long)p.serviceTimeNano + usedNS;
+static void removePCB(int i) {
+    g_table[i].occupied = 0;
+    g_table[i].pid = 0;
+    g_table[i].localPid = 0;
+    g_table[i].blocked = 0;
+    g_table[i].requestedResource = -1;
+    for (int r = 0; r < NUM_RESOURCES; r++) {
+        g_table[i].resourcesAllocated[r] = 0;
+    }
+}
 
-    p.serviceTimeSeconds += (unsigned int)(total / BILLION);
-    p.serviceTimeNano = (unsigned int)(total % BILLION);
+static void signalHandler(int) {
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        if (g_table[i].occupied && g_table[i].pid > 0) {
+            kill(g_table[i].pid, SIGTERM);
+        }
+    }
+    while (waitpid(-1, nullptr, WNOHANG) > 0) {}
+    cleanup();
+    _exit(1);
 }
 
 static int findFreeSlot() {
@@ -101,416 +125,346 @@ static int findFreeSlot() {
     return -1;
 }
 
-static void printReadyQueue() {
-	queue<int> temp = readyQueue;
-	string line = "OSS: Ready queue [";
-	while(!temp.empty()) {
-		int idx = temp.front();
-		temp.pop();
-		line += " p" + to_string(g_table[idx].localPid);
-	}
-	line += " ]\n";
-	logBoth("%s", line.c_str());
-}
+static void printTables() {
+    logBoth("\nOSS PID:%d SysClock:%u:%u\n", getpid(), g_clk->seconds, g_clk->nanoseconds);
+    logBoth("Process Table:\n");
+    logBoth("Idx Occ PID Local Block Req ");
+    for (int r = 0; r < NUM_RESOURCES; r++) logBoth("A%d ", r);
+    logBoth("\n");
 
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        logBoth("%2d  %d  %5d %5d %5d %3d ",
+                i,
+                g_table[i].occupied,
+                g_table[i].pid,
+                g_table[i].localPid,
+                g_table[i].blocked,
+                g_table[i].requestedResource);
 
+        for (int r = 0; r < NUM_RESOURCES; r++) {
+            logBoth("%2d ", g_table[i].resourcesAllocated[r]);
+        }
+        logBoth("\n");
+    }
 
-
-static void printBlockedList() {
-    string line = "OSS: Blocked queue [";
+    logBoth("Available:\n");
+    for (int r = 0; r < NUM_RESOURCES; r++) logBoth("R%d ", r);
+    logBoth("\n");
+    for (int r = 0; r < NUM_RESOURCES; r++) logBoth("%2d ", g_available[r]);
+    logBoth("\nBlocked: ");
     for (int i = 0; i < TABLE_SIZE; i++) {
         if (g_table[i].occupied && g_table[i].blocked) {
-            line += " p" + to_string(g_table[i].localPid);
+            logBoth("P%d(wait R%d) ", g_table[i].localPid, g_table[i].requestedResource);
         }
     }
-    line += " ]\n";
-    logBoth("%s", line.c_str());
+    logBoth("\n\n");
 }
 
-
-static void printProcessTable() {
-    logBoth("\nOSS PID:%d SysClockS: %u SysClockNano: %u\n",
-            getpid(), g_clk->seconds, g_clk->nanoseconds);
-    logBoth("Process Table:\n");
-    logBoth("Entry Occupied PID LocalPID StartS StartN ServiceS ServiceN EventWaitS EventWaitN Blocked\n");
-
-    for (int i = 0; i < TABLE_SIZE; i++) {
-        PCB& p = g_table[i];
-        logBoth("%d %d %d %d %u %u %u %u %u %u %d\n",
-                i,
-                p.occupied ? 1 : 0,
-                (int)p.pid,
-                p.localPid,
-                p.startSeconds,
-                p.startNano,
-                p.serviceTimeSeconds,
-                p.serviceTimeNano,
-                p.eventWaitSec,
-                p.eventWaitNano,
-                p.blocked ? 1 : 0);
-    }
-    printReadyQueue();
-    printBlockedList();
-    logBoth("\n");
-}
-
-static void cleanup() {
-    for (int i = 0; i < TABLE_SIZE; i++) {
-        if (g_table[i].occupied && g_table[i].pid > 0) {
-            kill(g_table[i].pid, SIGTERM);
-        }
-    }
-
-    for (int i = 0; i < TABLE_SIZE; i++) {
-        if (g_table[i].occupied && g_table[i].pid > 0) {
-            waitpid(g_table[i].pid, nullptr, 0);
-        }
-    }
-
-    while (waitpid(-1, nullptr, WNOHANG) > 0) {}
-
-    if (g_clk && g_clk != (SimClock*)-1) {
-        shmdt(g_clk);
-        g_clk = nullptr;
-    }
-
-    if (g_shmid != -1) {
-        shmctl(g_shmid, IPC_RMID, nullptr);
-        g_shmid = -1;
-    }
-
-    if (g_msgid != -1) {
-        msgctl(g_msgid, IPC_RMID, nullptr);
-        g_msgid = -1;
-    }
-
-    if (g_logFile) {
-        fclose(g_logFile);
-        g_logFile = nullptr;
-    }
-}
-
-static void signal_handler(int) {
-    cleanup();
-    _exit(1);
-}
-
-static void printHelp(const char* prog) {
-    cout << "Usage: " << prog
-         << " [-h] [-n proc] [-s simul] [-t timelimitForChildren] "
-         << "[-i fractionOfSecondToLaunchChildren] [-f logfile]\n";
-}
-
-static unsigned int randomCpuBurstNS(double maxT) {
-    unsigned long long maxNS = (unsigned long long)(maxT * 1000000000.0);
-    if (maxNS == 0) return 1;
-    return (unsigned int)(1 + (rand() % maxNS));
-}
-
-static bool queueContains(queue<int> q, int target) {
-    while (!q.empty()) {
-        if (q.front() == target) return true;
-        q.pop();
+static bool grantIfPossible(int i, int r) {
+    if (r < 0 || r >= NUM_RESOURCES) return false;
+    if (g_available[r] > 0) {
+        g_available[r]--;
+        g_table[i].resourcesAllocated[r]++;
+        g_table[i].blocked = 0;
+        g_table[i].requestedResource = -1;
+        return true;
     }
     return false;
 }
 
-static void checkBlockedProcesses() {
+static void tryUnblockProcesses() {
     for (int i = 0; i < TABLE_SIZE; i++) {
         if (g_table[i].occupied && g_table[i].blocked) {
-            if (timeGTE(g_clk->seconds, g_clk->nanoseconds,
-                        g_table[i].eventWaitSec, g_table[i].eventWaitNano)) {
-                g_table[i].blocked = false;
-                if (!queueContains(readyQueue, i)) {
-                    readyQueue.push(i);
-                }
-                addOverhead(10000); // waking/unblocking overhead
-                logBoth("OSS: Unblocking process P%d at time %u:%u\n",
-                        g_table[i].localPid, g_clk->seconds, g_clk->nanoseconds);
+            int r = g_table[i].requestedResource;
+            if (grantIfPossible(i, r)) {
+                Message wake;
+                wake.mtype = g_table[i].pid;
+                wake.index = i;
+                wake.action = 999; // just a wake-up token
+                wake.granted = r;
+                msgsnd(g_msgid, &wake, sizeof(Message) - sizeof(long), 0);
+
+                logBoth("Master unblocking P%d and granting R%d at time %u:%u\n",
+                        g_table[i].localPid, r, g_clk->seconds, g_clk->nanoseconds);
             }
         }
     }
 }
 
+static bool detectDeadlock(bool deadlocked[]) {
+    int work[NUM_RESOURCES];
+    bool finish[TABLE_SIZE];
+
+    for (int r = 0; r < NUM_RESOURCES; r++) work[r] = g_available[r];
+
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        if (!g_table[i].occupied) finish[i] = true;
+        else if (!g_table[i].blocked) finish[i] = true;
+        else finish[i] = false;
+    }
+
+    bool changed;
+    do {
+        changed = false;
+        for (int i = 0; i < TABLE_SIZE; i++) {
+            if (!finish[i] && g_table[i].occupied && g_table[i].blocked) {
+                int req = g_table[i].requestedResource;
+                if (req >= 0 && req < NUM_RESOURCES && work[req] > 0) {
+                    finish[i] = true;
+                    for (int r = 0; r < NUM_RESOURCES; r++) {
+                        work[r] += g_table[i].resourcesAllocated[r];
+                    }
+                    changed = true;
+                }
+            }
+        }
+    } while (changed);
+
+    bool found = false;
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        deadlocked[i] = (!finish[i] && g_table[i].occupied && g_table[i].blocked);
+        if (deadlocked[i]) found = true;
+    }
+    return found;
+}
+
+static void resolveDeadlock() {
+    bool deadlocked[TABLE_SIZE] = {false};
+    deadlockRuns++;
+
+    logBoth("Master running deadlock detection at time %u:%u\n",
+            g_clk->seconds, g_clk->nanoseconds);
+
+    if (!detectDeadlock(deadlocked)) {
+        logBoth("No deadlock detected.\n");
+        return;
+    }
+
+    logBoth("Deadlocked processes: ");
+    int victim = -1;
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        if (deadlocked[i]) {
+            logBoth("P%d ", g_table[i].localPid);
+            if (victim == -1) victim = i;
+        }
+    }
+    logBoth("\n");
+
+    if (victim != -1) {
+        logBoth("Killing process P%d to resolve deadlock.\n", g_table[victim].localPid);
+        kill(g_table[victim].pid, SIGTERM);
+        waitpid(g_table[victim].pid, nullptr, 0);
+        releaseAllResources(victim);
+        removePCB(victim);
+        activeChildren--;
+        deadlockKills++;
+    }
+}
+
 int main(int argc, char* argv[]) {
-    signal(SIGINT, signal_handler);
-    signal(SIGALRM, signal_handler);
-    alarm(3); 
-
-    srand((unsigned int)(time(nullptr) ^ getpid()));
-
     int n = 1;
     int s = 1;
-    double t = 2.0;
-    double interval = 0.1;
-    string logFilename = "log.txt";
+    int t = 1;
+    double launchInterval = 0.1;
+    string logfile = "log.txt";
 
     int opt;
     while ((opt = getopt(argc, argv, "hn:s:t:i:f:")) != -1) {
         switch (opt) {
             case 'h':
-                printHelp(argv[0]);
+                cout << "./oss [-h] [-n proc] [-s simul] [-t timeLimitForChildren] "
+                     << "[-i fractionOfSecondToLaunchChildren] [-f logfile]\n";
                 return 0;
-            case 'n':
-                n = atoi(optarg);
-                if (n <= 0 || n > 80) {
-                    cerr << "Error: -n must be 1..80\n";
-                    return 1;
-                }
-                break;
-            case 's':
-                s = atoi(optarg);
-                if (s <= 0 || s > 20) {
-                    cerr << "Error: -s must be 1..20\n";
-                    return 1;
-                }
-                break;
-            case 't':
-                t = atof(optarg);
-                if (t <= 0.0) {
-                    cerr << "Error: -t must be > 0\n";
-                    return 1;
-                }
-                break;
-            case 'i':
-                interval = atof(optarg);
-                if (interval < 0.0) {
-                    cerr << "Error: -i must be nonnegative\n";
-                    return 1;
-                }
-                break;
-            case 'f':
-                logFilename = optarg;
-                break;
-            default:
-                printHelp(argv[0]);
-                return 1;
+            case 'n': n = atoi(optarg); break;
+            case 's': s = atoi(optarg); break;
+            case 't': t = atoi(optarg); break;
+            case 'i': launchInterval = atof(optarg); break;
+            case 'f': logfile = optarg; break;
+            default: return 1;
         }
     }
 
+    if (n < 1) n = 1;
+    if (s < 1) s = 1;
+    if (t < 1) t = 1;
     if (s > n) s = n;
+    if (s > MAX_ACTIVE_PROCS) s = MAX_ACTIVE_PROCS;
 
-    g_logFile = fopen(logFilename.c_str(), "w");
-    if (!g_logFile) {
-        cerr << "OSS: failed to open log file: " << logFilename << "\n";
-        return 1;
-    }
+    g_logFile = fopen(logfile.c_str(), "w");
+
+    signal(SIGINT, signalHandler);
+    signal(SIGALRM, signalHandler);
+    alarm(5);
 
     key_t shmKey = ftok(".", 'C');
-    if (shmKey == -1) {
-        cerr << "OSS: ftok shared memory failed: " << strerror(errno) << "\n";
-        cleanup();
-        return 1;
-    }
-
-    g_shmid = shmget(shmKey, sizeof(SimClock), 0666 | IPC_CREAT);
-    if (g_shmid == -1) {
-        cerr << "OSS: shmget failed: " << strerror(errno) << "\n";
-        cleanup();
-        return 1;
-    }
-
+    g_shmid = shmget(shmKey, sizeof(SimClock), IPC_CREAT | 0666);
     g_clk = (SimClock*)shmat(g_shmid, nullptr, 0);
-    if (g_clk == (SimClock*)-1) {
-        cerr << "OSS: shmat failed: " << strerror(errno) << "\n";
-        cleanup();
-        return 1;
-    }
-
     g_clk->seconds = 0;
     g_clk->nanoseconds = 0;
 
     key_t msgKey = ftok(".", 'Q');
-    if (msgKey == -1) {
-        cerr << "OSS: ftok message queue failed: " << strerror(errno) << "\n";
-        cleanup();
-        return 1;
-    }
-
-    g_msgid = msgget(msgKey, 0666 | IPC_CREAT);
-    if (g_msgid == -1) {
-        cerr << "OSS: msgget failed: " << strerror(errno) << "\n";
-        cleanup();
-        return 1;
-    }
+    g_msgid = msgget(msgKey, IPC_CREAT | 0666);
 
     memset(g_table, 0, sizeof(g_table));
+    for (int i = 0; i < TABLE_SIZE; i++) g_table[i].requestedResource = -1;
+    for (int r = 0; r < NUM_RESOURCES; r++) {
+        g_totalResources[r] = INSTANCES_PER_RESOURCE;
+        g_available[r] = INSTANCES_PER_RESOURCE;
+    }
 
-    unsigned int intervalNS = (unsigned int)(interval * 1000000000.0);
+    unsigned int nextLaunchSec = 0;
+    unsigned int nextLaunchNano = 0;
+    unsigned int nextPrintSec = 0;
+    unsigned int nextPrintNano = 500000000U;
+    unsigned int nextDeadlockSec = 1;
+    unsigned int nextDeadlockNano = 0;
 
-    int launched = 0;
-    int activeChildren = 0;
-    int nextLocalPid = 1;
+    while (totalLaunched < n || activeChildren > 0) {
+        while (waitpid(-1, nullptr, WNOHANG) > 0) {}
 
-    unsigned int nextLaunchS = 0;
-    unsigned int nextLaunchNS = 0;
-
-    unsigned int lastPrintS = 0;
-    unsigned int lastPrintNS = 0;
-
-    while (launched < n || activeChildren > 0) {
-        // launch new child if time allows and capacity allows
-        if (launched < n && activeChildren < s &&
-            timeGTE(g_clk->seconds, g_clk->nanoseconds, nextLaunchS, nextLaunchNS)) {
+        if (totalLaunched < n &&
+            activeChildren < s &&
+            activeChildren < MAX_ACTIVE_PROCS &&
+            reachedTime(g_clk->seconds, g_clk->nanoseconds, nextLaunchSec, nextLaunchNano)) {
 
             int slot = findFreeSlot();
             if (slot != -1) {
-                int localPid = nextLocalPid++;
-                unsigned int totalCpuBurstNs = randomCpuBurstNS(t);
+                unsigned int endSec = g_clk->seconds + (unsigned int)t;
+                unsigned int endNano = g_clk->nanoseconds;
 
-                pid_t child = fork();
-                if (child == 0) {
-                    string pidStr = to_string(localPid);
-                    string burstStr = to_string(totalCpuBurstNs);
-                    execl("./worker", "worker",
-                          pidStr.c_str(), burstStr.c_str(),
-                          (char*)nullptr);
-                    cerr << "OSS: execl failed: " << strerror(errno) << "\n";
+                pid_t pid = fork();
+                if (pid == 0) {
+                    char idxBuf[16], secBuf[32], nanoBuf[32];
+                    snprintf(idxBuf, sizeof(idxBuf), "%d", slot);
+                    snprintf(secBuf, sizeof(secBuf), "%u", endSec);
+                    snprintf(nanoBuf, sizeof(nanoBuf), "%u", endNano);
+                    execl("./worker", "worker", idxBuf, secBuf, nanoBuf, (char*)nullptr);
+                    perror("execl worker");
                     _exit(1);
-                } else if (child > 0) {
-                    g_table[slot].occupied = true;
-                    g_table[slot].pid = child;
-                    g_table[slot].localPid = localPid;
+                } else if (pid > 0) {
+                    g_table[slot].occupied = 1;
+                    g_table[slot].pid = pid;
+                    g_table[slot].localPid = nextLocalPid++;
                     g_table[slot].startSeconds = g_clk->seconds;
                     g_table[slot].startNano = g_clk->nanoseconds;
-                    g_table[slot].serviceTimeSeconds = 0;
-                    g_table[slot].serviceTimeNano = 0;
-                    g_table[slot].eventWaitSec = 0;
-                    g_table[slot].eventWaitNano = 0;
-                    g_table[slot].blocked = false;
+                    g_table[slot].endSeconds = endSec;
+                    g_table[slot].endNano = endNano;
+                    g_table[slot].blocked = 0;
+                    g_table[slot].requestedResource = -1;
+                    memset(g_table[slot].resourcesAllocated, 0, sizeof(g_table[slot].resourcesAllocated));
 
-                    readyQueue.push(slot);
-
-                    launched++;
+                    totalLaunched++;
                     activeChildren++;
 
-                    addOverhead(10000); // launch overhead
+                    double whole;
+                    double frac = modf(launchInterval, &whole);
+                    nextLaunchSec = g_clk->seconds + (unsigned int)whole;
+                    nextLaunchNano = g_clk->nanoseconds + (unsigned int)(frac * BILLION);
+                    while (nextLaunchNano >= BILLION) {
+                        nextLaunchSec++;
+                        nextLaunchNano -= BILLION;
+                    }
 
-                    addTimeToPair(g_clk->seconds, g_clk->nanoseconds,
-                                  intervalNS, nextLaunchS, nextLaunchNS);
-
-                    logBoth("OSS: Generating process with PID %d and putting it in ready queue at time %u:%u\n",
-                            localPid, g_clk->seconds, g_clk->nanoseconds);
-                } else {
-                    cerr << "OSS: fork failed: " << strerror(errno) << "\n";
+                    logBoth("Launched P%d in slot %d pid %d at %u:%u ending at %u:%u\n",
+                            g_table[slot].localPid, slot, pid,
+                            g_clk->seconds, g_clk->nanoseconds, endSec, endNano);
                 }
             }
         }
 
-        // unblock processes whose event time has arrived
-        checkBlockedProcesses();
+        tryUnblockProcesses();
 
-        // if a ready process exists, dispatch it
-        if (!readyQueue.empty()) {
-            printReadyQueue();
+        addTime(CLOCK_INCREMENT_NS);
 
-            int slot = readyQueue.front();
-            readyQueue.pop();
-
-            PCB& p = g_table[slot];
-
-            if (!p.occupied || p.blocked) {
-                continue;
+        int picked = -1;
+        for (int i = 0; i < TABLE_SIZE; i++) {
+            if (g_table[i].occupied && !g_table[i].blocked) {
+                picked = i;
+                break;
             }
+        }
 
-            addOverhead(1000); // scheduling decision overhead
-
-            logBoth("OSS: Dispatching process with PID %d from ready queue at time %u:%u\n",
-                    p.localPid, g_clk->seconds, g_clk->nanoseconds);
-            logBoth("OSS: total time this dispatch was 1000 nanoseconds\n");
-
+        if (picked != -1) {
             Message msg;
-            msg.mtype = p.pid; // send directly to this worker
-            msg.index = slot;
-            msg.quantum = QUANTUM_NS;
-            msg.usedTime = 0;
-            msg.action = ACTION_FULL_QUANTUM;
+            msg.mtype = g_table[picked].pid;
+            msg.index = picked;
+            msg.action = 999;
+            msg.granted = -1;
 
             if (msgsnd(g_msgid, &msg, sizeof(Message) - sizeof(long), 0) == -1) {
-                cerr << "OSS: msgsnd failed: " << strerror(errno) << "\n";
-                cleanup();
-                return 1;
+                perror("msgsnd to worker");
+                signalHandler(0);
             }
 
             Message reply;
             if (msgrcv(g_msgid, &reply, sizeof(Message) - sizeof(long), 1, 0) == -1) {
-                cerr << "OSS: msgrcv failed: " << strerror(errno) << "\n";
-                cleanup();
-                return 1;
+                perror("msgrcv from worker");
+                signalHandler(0);
             }
 
-            addToClock(reply.usedTime);
-            g_totalBusyTime += reply.usedTime;
-            addServiceTime(p, reply.usedTime);
+            int i = reply.index;
+            int action = reply.action;
 
-            logBoth("OSS: Receiving that process with PID %d ran for %u nanoseconds\n",
-                    p.localPid, reply.usedTime);
+            if (action > 0) {
+                int r = action - 1;
+                totalRequests++;
+                logBoth("Master has detected P%d requesting R%d at time %u:%u\n",
+                        g_table[i].localPid, r, g_clk->seconds, g_clk->nanoseconds);
 
-            if (reply.action == ACTION_TERMINATED) {
-                logBoth("OSS: Process with PID %d terminated at time %u:%u\n",
-                        p.localPid, g_clk->seconds, g_clk->nanoseconds);
-
-                int status = 0;
-                waitpid(p.pid, &status, 0);
-                memset(&g_table[slot], 0, sizeof(PCB));
+                if (grantIfPossible(i, r)) {
+                    grantedImmediately++;
+                    logBoth("Master granting P%d request R%d at time %u:%u\n",
+                            g_table[i].localPid, r, g_clk->seconds, g_clk->nanoseconds);
+                } else {
+                    g_table[i].blocked = 1;
+                    g_table[i].requestedResource = r;
+                    logBoth("Master blocking P%d for R%d at time %u:%u\n",
+                            g_table[i].localPid, r, g_clk->seconds, g_clk->nanoseconds);
+                }
+            } else if (action < 0) {
+                int r = (-action) - 1;
+                if (r >= 0 && r < NUM_RESOURCES && g_table[i].resourcesAllocated[r] > 0) {
+                    g_table[i].resourcesAllocated[r]--;
+                    g_available[r]++;
+                    logBoth("Master has acknowledged P%d releasing R%d at time %u:%u\n",
+                            g_table[i].localPid, r, g_clk->seconds, g_clk->nanoseconds);
+                }
+            } else {
+                logBoth("Master sees P%d terminating at time %u:%u\n",
+                        g_table[i].localPid, g_clk->seconds, g_clk->nanoseconds);
+                releaseAllResources(i);
+                waitpid(g_table[i].pid, nullptr, 0);
+                removePCB(i);
                 activeChildren--;
             }
-            else if (reply.action == ACTION_BLOCKED) {
-                logBoth("OSS: not using its entire time quantum\n");
-                logBoth("OSS: Putting process with PID %d into blocked queue\n",
-                        p.localPid);
-
-                p.blocked = true;
-                addTimeToPair(g_clk->seconds, g_clk->nanoseconds,
-                              BLOCKED_TIME_NS,
-                              p.eventWaitSec, p.eventWaitNano);
-            }
-            else {
-                logBoth("OSS: Putting process with PID %d into ready queue\n",
-                        p.localPid);
-                readyQueue.push(slot);
-            }
-        }
-        else {
-            // no ready process; advance time until something happens
-            addOverhead(10000);
         }
 
-        // reap any unexpected dead children
-        while (true) {
-            int status = 0;
-            pid_t dead = waitpid(-1, &status, WNOHANG);
-            if (dead <= 0) break;
+        addTime(CLOCK_INCREMENT_NS);
 
-            for (int i = 0; i < TABLE_SIZE; i++) {
-                if (g_table[i].occupied && g_table[i].pid == dead) {
-                    memset(&g_table[i], 0, sizeof(PCB));
-                    activeChildren--;
-                    break;
-                }
+        if (reachedTime(g_clk->seconds, g_clk->nanoseconds, nextPrintSec, nextPrintNano)) {
+            printTables();
+            nextPrintSec = g_clk->seconds;
+            nextPrintNano = g_clk->nanoseconds + 500000000U;
+            while (nextPrintNano >= BILLION) {
+                nextPrintSec++;
+                nextPrintNano -= BILLION;
             }
         }
 
-        // print every half second simulated time
-        if (nanosBetween(lastPrintS, lastPrintNS,
-                         g_clk->seconds, g_clk->nanoseconds) >= 500000000LL) {
-            printProcessTable();
-            lastPrintS = g_clk->seconds;
-            lastPrintNS = g_clk->nanoseconds;
+        if (reachedTime(g_clk->seconds, g_clk->nanoseconds, nextDeadlockSec, nextDeadlockNano)) {
+            resolveDeadlock();
+            nextDeadlockSec = g_clk->seconds + 1;
+            nextDeadlockNano = g_clk->nanoseconds;
         }
     }
 
-    unsigned long long totalTime = g_totalBusyTime + g_totalOverheadTime;
-    double cpuUtil = 0.0;
-    if (totalTime > 0) {
-        cpuUtil = (double)g_totalBusyTime / (double)totalTime * 100.0;
-    }
-
-    logBoth("\nOSS Summary:\n");
-    logBoth("Total processes launched: %d\n", launched);
-    logBoth("Total worker busy time (ns): %llu\n", g_totalBusyTime);
-    logBoth("Total oss overhead time (ns): %llu\n", g_totalOverheadTime);
-    logBoth("Average CPU utilization: %.2f%%\n", cpuUtil);
+    logBoth("\nFinal Statistics:\n");
+    logBoth("Total requests: %d\n", totalRequests);
+    logBoth("Granted immediately: %d\n", grantedImmediately);
+    double pct = (totalRequests > 0) ? (100.0 * grantedImmediately / totalRequests) : 0.0;
+    logBoth("Immediate grant percentage: %.2f%%\n", pct);
+    logBoth("Deadlock detection runs: %d\n", deadlockRuns);
+    logBoth("Processes killed for deadlock: %d\n", deadlockKills);
 
     cleanup();
     return 0;
