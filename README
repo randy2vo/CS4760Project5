@@ -1,0 +1,112 @@
+Name: Randy Vo
+Date: 04-07-2026
+Environment: opsys (Linux), vim
+Project 4 
+-----------------------------------------------------------------------------------------------------------------------------
+
+Description:
+
+This project simulates the process scheduling portion of an operating system using a round-robin scheduling algorithm. It consists of two executables: oss and worker.
+
+The oss program acts as the operating system scheduler. It maintains a simulated system clock in shared memory using two unsigned integers (seconds and nanoseconds). It also manages a process table of up to 20 process control blocks (PCBs), tracking information such as process start time, total CPU service time, blocked state, and event wait times.
+
+Unlike Project 3, oss now schedules processes using a round-robin algorithm with a fixed time quantum of 25 milliseconds (25,000,000 nanoseconds). A ready queue is maintained, and only one process is in the running state at any given time. oss selects the next process from the front ofthe ready queue, dispatches it by sending a message through a System V message queue, and waits for a response.
+
+Worker processes simulate CPU execution. Each worker is assigned a total CPU burst time at creation. When scheduled, the worker receives a time quantum from oss and determines one of three outcomes:
+
+Uses the full time quantum
+Uses part of the quantum and becomes blocked (20% chance)
+Uses part of the quantum and terminates
+
+If a process becomes blocked, oss places it in a blocked state for 100 milliseconds before returning it to the ready queue.
+
+The system clock is only advanced by oss to represent time spent on scheduling decisions, process execution, and system overhead. Workers do not modify the clock directly.
+
+The process table and queue states are printed every 0.5 seconds of simulated time. The simulation terminates after all processes have completed or after 3 real-life seconds.
+
+This project expands on Project 3 by implementing true scheduling behavior, introducing a ready queue, blocked queue handling, and more detailed interprocess communication using message queues.
+
+
+------------------------------------------------------------------------------------------------------------------------------ 
+
+
+How to compile:
+
+Type 'make'
+
+This will compile both oss and worker exec. 
+
+------------------------------------------------------------------------------------------------------------------------------
+
+Example of how to run:
+
+
+./oss [-h] [-n proc] [-s simul] [-t timeLimitForChildren] [-i intervalToLaunch] [-f logfile]
+
+  -h       Show help message and exit
+  -n proc  Total number of worker processes to launch (max 80)
+  -s simul Maximum number of workers allowed to run simultaneously (max 15)
+  -t secs  Simulated time limit passed to each worker (float, e.g. 2.5)
+  -i secs  Minimum simulated interval between launches (float, e.g. 0.1)
+  -f file  Log file name for scheduler output 
+Example:
+  ./oss -n 5 -s 3 -t 4 -i 0.5 -f log.txt
+
+This launches 5 workers total, no more than 3 at a time, each running for
+up to 4 simulated seconds, with at least 0.5 simulated seconds between
+each launch and the output is written to log.txt.
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+Problems Encountered:
+
+- redesigning the scheduling logic. Instead of looping through processes, a proper ready queue had to be implemented for round-robin scheduling.
+
+- Debugging timing behavior was difficult because the simulated clock only advances when work is done, rather than continuously.
+
+- Each blocked process required tracking an event wait time and periodically checking when it should return to the ready queue.
+
+- Any nanosecond value exceeding 1,000,000,000 required conversion into seconds.
+
+- Proper cleanup of shared memory and message queues to prevent resource leaks when the program terminated unexpectedly. Using the command below to mannually cleanup:
+
+ipcs
+ipcrm -m <shmid>
+ipcrm -q <msgid>
+
+------------------------------------------------------------------------------------------------------------------------------
+
+Version Control:
+
+Used git for version control. Commits were made at least once every other day. To view the commit log:
+
+	git log
+
+------------------------------------------------------------------------------------------------------------------------------
+
+Generative AI used: ChatGPT and claude.ai
+
+Prompts used:
+
+- Walk me through doing this project.
+- Describle this line.
+- Explain round-robin scheduling with message queues
+- Explain blocked queue and event timing logic
+- 
+
+
+Summary: Claude was helpful in structuring the overall approach to the project. Chatgpt was helpful in explaining shared memory concept. Re-used Project 2 as the baseline for argument parsing. Understanding each line of the generated code was important to make sure I full comprehend each line rather than just submitting code blindly. 
+
+--------------------------------------------------------------------------------------------------------------------------------
+
+Extra:
+
+If the number of -s is greater than -n then -s will become at most -n.
+
+NO negative integer will be accepted, ONLY POSTIVE.
+
+If running with no arguments (e.g "./oss"), default case would be -n 1 -s 1 -t 1 -i 0.1.
+
+Added a header file (shared.h) to store shared data structures and reduce code duplication thus improving readability.
+
