@@ -3,57 +3,39 @@
 
 #include <sys/types.h>
 
-// ------------------------------
-// Constants
-// ------------------------------
 const int TABLE_SIZE = 20;
+const int MAX_ACTIVE_PROCS = 18;
+const int NUM_RESOURCES = 10;
+const int INSTANCES_PER_RESOURCE = 5;
 const unsigned int BILLION = 1000000000U;
-const unsigned int QUANTUM_NS = 25000000U;   // 25 ms
-const unsigned int BLOCKED_TIME_NS = 100000000U; // 100 ms
+const unsigned int CLOCK_INCREMENT_NS = 10000000U; // 10 ms
 
-// Worker actions returned to oss
-const int ACTION_FULL_QUANTUM = 0;
-const int ACTION_BLOCKED      = 1;
-const int ACTION_TERMINATED   = 2;
-
-// ------------------------------
-// Shared simulated clock
-// ------------------------------
 struct SimClock {
     unsigned int seconds;
     unsigned int nanoseconds;
 };
 
-// ------------------------------
-// Message queue structure
-// mtype = destination process type
-// ------------------------------
-struct Message {
-    long mtype;                // required by System V queues
-    int index;                 // PCB slot or simulated pid
-    unsigned int quantum;      // quantum sent by oss
-    unsigned int usedTime;     // time actually used by worker
-    int action;                // full quantum / blocked / terminated
-};
-
-// ------------------------------
-// Process Control Block
-// ------------------------------
 struct PCB {
-    bool occupied;                   // slot in use or not
-    pid_t pid;                       // real Linux pid
-    int localPid;                    // simulated pid for logging
+    int occupied;
+    pid_t pid;
+    int localPid;
 
-    unsigned int startSeconds;       // when created
+    unsigned int startSeconds;
     unsigned int startNano;
 
-    unsigned int serviceTimeSeconds; // total CPU time used
-    unsigned int serviceTimeNano;
+    unsigned int endSeconds;
+    unsigned int endNano;
 
-    unsigned int eventWaitSec;       // when blocked process wakes up
-    unsigned int eventWaitNano;
+    int blocked;                    // 1 if blocked, 0 otherwise
+    int requestedResource;          // 0..9 if blocked, -1 otherwise
+    int resourcesAllocated[NUM_RESOURCES];
+};
 
-    bool blocked;                    // currently blocked?
+struct Message {
+    long mtype;     // child pid when oss->worker, 1 when worker->oss
+    int index;      // PCB slot
+    int action;     // >0 request R(action-1), <0 release R((-action)-1), 0 terminate
+    int granted;    // oss can set this when waking a blocked process
 };
 
 #endif
