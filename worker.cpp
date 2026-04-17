@@ -74,7 +74,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // If oss woke us up after a blocked request was granted
+        // If oss is waking us because a previously blocked request was granted
         if (msg.granted >= 0 && msg.granted < NUM_RESOURCES) {
             owned[msg.granted]++;
         }
@@ -85,43 +85,54 @@ int main(int argc, char* argv[]) {
             reply.index = index;
             reply.action = 0;   // terminate
             reply.granted = -1;
-            msgsnd(msgid, &reply, sizeof(Message) - sizeof(long), 0);
+
+            if (msgsnd(msgid, &reply, sizeof(Message) - sizeof(long), 0) == -1) {
+                cerr << "Worker terminate msgsnd failed: " << strerror(errno) << "\n";
+                shmdt(clk);
+                return 1;
+            }
             break;
         }
 
-        int percent = rand() % 100;
         Message reply;
         reply.mtype = 1;
         reply.index = index;
         reply.granted = -1;
 
-        // Prefer requests over releases, around 70/30
+        int percent = rand() % 100;
+
+        // About 70% request, 30% release
         if (percent < 70) {
             int r = rand() % NUM_RESOURCES;
+
+            // request one more instance if we do not already own max possible
             if (owned[r] < INSTANCES_PER_RESOURCE) {
-                reply.action = r + 1; // request resource r
+                reply.action = r + 1;   // request Rr
             } else {
-                bool released = false;
+                // fallback: release something we do own
+                bool found = false;
                 for (int i = 0; i < NUM_RESOURCES; i++) {
                     if (owned[i] > 0) {
                         owned[i]--;
-                        reply.action = -(i + 1);
-                        released = true;
+                        reply.action = -(i + 1); // release Ri
+                        found = true;
                         break;
                     }
                 }
-                if (!released) {
+
+                if (!found) {
                     int rr = rand() % NUM_RESOURCES;
                     reply.action = rr + 1;
                 }
             }
         } else {
             bool released = false;
+
             for (int tries = 0; tries < NUM_RESOURCES; tries++) {
                 int r = rand() % NUM_RESOURCES;
                 if (owned[r] > 0) {
                     owned[r]--;
-                    reply.action = -(r + 1); // release resource r
+                    reply.action = -(r + 1); // release Rr
                     released = true;
                     break;
                 }
