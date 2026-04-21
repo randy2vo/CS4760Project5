@@ -1,5 +1,5 @@
 Name: Randy Vo
-Date: 04-07-2026
+Date: 04-13-2026
 Environment: opsys (Linux), vim
 Project 5
 
@@ -7,29 +7,33 @@ Project 5
 
 Description:
 
-This project simulates the process scheduling portion of an operating system using a round-robin scheduling algorithm. It consists of two executables: oss and worker.
+This project simulates resource management in an operating system, including process creation, resource allocation, blocking, and deadlock detection.
 
-The oss program acts as the operating system scheduler. It maintains a simulated system clock in shared memory using two unsigned integers (seconds and nanoseconds). It also manages a process table of up to 20 process control blocks (PCBs), tracking information such as process start time, total CPU service time, blocked state, and event wait times.
+The oss program acts as the operating system. It maintains a simulated system clock in shared memory using seconds and nanoseconds. It also manages a process table of up to 20 process control blocks (PCBs), tracking process state, allocated resources, and pending requests.
 
-Unlike Project 3, oss now schedules processes using a round-robin algorithm with a fixed time quantum of 25 milliseconds (25,000,000 nanoseconds). A ready queue is maintained, and only one process is in the running state at any given time. oss selects the next process from the front ofthe ready queue, dispatches it by sending a message through a System V message queue, and waits for a response.
+Processes communicate with oss using System V message queues. Each worker randomly requests or releases resources during execution.
 
-Worker processes simulate CPU execution. Each worker is assigned a total CPU burst time at creation. When scheduled, the worker receives a time quantum from oss and determines one of three outcomes:
+If a resource request cannot be granted, the process becomes blocked and is placed in a blocked queue until the resource becomes available.
 
-Uses the full time quantum
-Uses part of the quantum and becomes blocked (20% chance)
-Uses part of the quantum and terminates
+The system periodically runs a deadlock detection algorithm. If a deadlock involving multiple processes is detected, oss resolves it by terminating one of the deadlocked processes and releasing its resources.
 
-If a process becomes blocked, oss places it in a blocked state for 100 milliseconds before returning it to the ready queue.
+Additionally, blocked processes that exceed their maximum lifetime are terminated by oss to prevent indefinite waiting.
 
-The system clock is only advanced by oss to represent time spent on scheduling decisions, process execution, and system overhead. Workers do not modify the clock directly.
+The simulation prints the process table and resource allocation state at regular intervals and terminates after all processes complete or a time limit is 
+reached.
 
-The process table and queue states are printed every 0.5 seconds of simulated time. The simulation terminates after all processes have completed or after 3 real-life seconds.
-
-This project expands on Project 3 by implementing true scheduling behavior, introducing a ready queue, blocked queue handling, and more detailed interprocess communication using message queues.
-
+Worker processes simulate resource usage by randomly requesting or releasing resources. Each request is sent to oss, which either grants it immediately or blocks the process if the resource is unavailable.
 
 ------------------------------------------------------------------------------------------------------------------------------ 
 
+Deadlock Handling:
+
+The system periodically checks for deadlock by simulating whether blocked processes can eventually proceed given available resources.
+
+A deadlock is only considered valid if two or more processes are blocked. If deadlock is detected, oss selects one process to terminate, releases its resources, and allows the remaining processes to continue.
+
+
+------------------------------------------------------------------------------------------------------------------------------
 
 How to compile:
 
@@ -69,6 +73,9 @@ Problems Encountered:
 - Each blocked process required tracking an event wait time and periodically checking when it should return to the ready queue.
 
 - Any nanosecond value exceeding 1,000,000,000 required conversion into seconds.
+
+- Added a safeguard to terminate blocked processes whose simulated runtime has expired. Without this, a single blocked process could wait indefinitely if no 
+  other process releases the requested resource. 
 
 - Proper cleanup of shared memory and message queues to prevent resource leaks when the program terminated unexpectedly. Using the command below to mannually cleanup:
 
