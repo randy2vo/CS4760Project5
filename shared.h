@@ -26,16 +26,17 @@ struct PCB {
     unsigned int endSeconds;
     unsigned int endNano;
 
-    int blocked;                    // 1 if blocked, 0 otherwise
-    int requestedResource;          // 0..9 if blocked, -1 otherwise
+    int blocked;                    
+    int requestedResource;          
     int resourcesAllocated[NUM_RESOURCES];
+    int pendingGrants;
 };
 
 struct Message {
-    long mtype;     // child pid when oss->worker, 1 when worker->oss
-    int index;      // PCB slot
-    int action;     // >0 request R(action-1), <0 release R((-action)-1), 0 terminate
-    int granted;    // oss can set this when waking a blocked process
+    long mtype;     
+    int index;      
+    int action;     
+    int granted;    
 };
 
 #endif
