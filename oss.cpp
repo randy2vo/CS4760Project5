@@ -249,14 +249,33 @@ static bool detectDeadlock(bool deadlocked[]) {
     int work[NUM_RESOURCES];
     bool finish[TABLE_SIZE];
 
+    int blockedCount = 0;
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        if (g_table[i].occupied && g_table[i].blocked) {
+            blockedCount++;
+        }
+    }
+
+    // A single blocked process is not a deadlock.
+    if (blockedCount < 2) {
+        for (int i = 0; i < TABLE_SIZE; i++) {
+            deadlocked[i] = false;
+        }
+        return false;
+    }
+
     for (int r = 0; r < NUM_RESOURCES; r++) {
         work[r] = g_available[r];
     }
 
     for (int i = 0; i < TABLE_SIZE; i++) {
-        if (!g_table[i].occupied) finish[i] = true;
-        else if (!g_table[i].blocked) finish[i] = true;
-        else finish[i] = false;
+        if (!g_table[i].occupied) {
+            finish[i] = true;
+        } else if (!g_table[i].blocked) {
+            finish[i] = true;
+        } else {
+            finish[i] = false;
+        }
     }
 
     bool changed;
@@ -265,6 +284,7 @@ static bool detectDeadlock(bool deadlocked[]) {
         for (int i = 0; i < TABLE_SIZE; i++) {
             if (!finish[i] && g_table[i].occupied && g_table[i].blocked) {
                 int req = g_table[i].requestedResource;
+
                 if (req >= 0 && req < NUM_RESOURCES && work[req] > 0) {
                     finish[i] = true;
                     for (int r = 0; r < NUM_RESOURCES; r++) {
@@ -279,7 +299,9 @@ static bool detectDeadlock(bool deadlocked[]) {
     bool found = false;
     for (int i = 0; i < TABLE_SIZE; i++) {
         deadlocked[i] = (!finish[i] && g_table[i].occupied && g_table[i].blocked);
-        if (deadlocked[i]) found = true;
+        if (deadlocked[i]) {
+            found = true;
+        }
     }
 
     return found;
@@ -287,6 +309,19 @@ static bool detectDeadlock(bool deadlocked[]) {
 
 static void resolveDeadlock(int& activeChildren) {
     bool deadlocked[TABLE_SIZE] = {false};
+
+    int blockedCount = 0;
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        if (g_table[i].occupied && g_table[i].blocked) {
+            blockedCount++;
+        }
+    }
+
+    // No true deadlock possible unless at least 2 processes are blocked.
+    if (blockedCount < 2) {
+        return;
+    }
+
     g_deadlockRuns++;
 
     logBoth("Master running deadlock detection at time %u:%u\n",
@@ -304,7 +339,9 @@ static void resolveDeadlock(int& activeChildren) {
     for (int i = 0; i < TABLE_SIZE; i++) {
         if (deadlocked[i]) {
             logBoth(" P%d", g_table[i].localPid);
-            if (victim == -1) victim = i;
+            if (victim == -1) {
+                victim = i;
+            }
         }
     }
     logBoth("\nAttempting to resolve deadlock...\n");
