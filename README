@@ -66,11 +66,8 @@ each launch and the output is written to log.txt.
 
 Problems Encountered:
 
-- redesigning the scheduling logic. Instead of looping through processes, a proper ready queue had to be implemented for round-robin scheduling.
 
 - Debugging timing behavior was difficult because the simulated clock only advances when work is done, rather than continuously.
-
-- Each blocked process required tracking an event wait time and periodically checking when it should return to the ready queue.
 
 - Any nanosecond value exceeding 1,000,000,000 required conversion into seconds.
 
@@ -101,7 +98,7 @@ Prompts used:
 - Describle this line.
 - Explain round-robin scheduling with message queues
 - Explain blocked queue and event timing logic
-- 
+ 
 
 
 Summary: Claude was helpful in structuring the overall approach to the project. Chatgpt was helpful in explaining shared memory concept. Re-used Project 2 as the baseline for argument parsing. Understanding each line of the generated code was important to make sure I full comprehend each line rather than just submitting code blindly. 
