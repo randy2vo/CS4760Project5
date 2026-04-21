@@ -603,12 +603,9 @@ int main(int argc, char* argv[]) {
                             g_table[i].localPid, r, g_clk->seconds, g_clk->nanoseconds);
                 }
 
-                if (grantResource(i, r)) {
-                    g_immediateGrants++;
-
-                    if (g_verbose) {
-                        logBoth("Master granting P%d request R%d at time %u:%u\n",
-                                g_table[i].localPid, r, g_clk->seconds, g_clk->nanoseconds);
+                    if (g_immediateGrants % 20 == 0) {
+                        logBoth("--- Allocation table after %d grants ---\n", g_immediateGrants);
+                        printResourceTable();
                     }
 
                     Message ack;
