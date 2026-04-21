@@ -572,11 +572,17 @@ int main(int argc, char* argv[]) {
             msg.action = 999;   // permission to run / act
             msg.granted = -1;
 
+            if (g_table[picked].pendingGrant >= 0) {
+                msg.granted = g_table[picked].pendingGrant;
+                g_table[picked].pendingGrant = -1;
+            }
+ 
             if (msgsnd(g_msgid, &msg, sizeof(Message) - sizeof(long), 0) == -1) {
-                cerr << "OSS: msgsnd failed: " << strerror(errno) << "\n";
+                cerr << "OSS: msgsnd dispatch failed: " << strerror(errno) << "\n";
                 cleanup();
                 return 1;
             }
+
 
             Message reply;
             if (msgrcv(g_msgid, &reply, sizeof(Message) - sizeof(long), 1, 0) == -1) {
