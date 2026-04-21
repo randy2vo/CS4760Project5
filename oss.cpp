@@ -365,6 +365,26 @@ static void resolveDeadlock(int& activeChildren) {
     }
 }
 
+static void reapExpiredBlockedProcesses(int& activeChildren) {
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        if (g_table[i].occupied && g_table[i].blocked) {
+            if (timeGTE(g_clk->seconds, g_clk->nanoseconds,
+                        g_table[i].endSeconds, g_table[i].endNano)) {
+
+                logBoth("Master terminating blocked Process P%d because its time expired at %u:%u\n",
+                        g_table[i].localPid, g_clk->seconds, g_clk->nanoseconds);
+
+                kill(g_table[i].pid, SIGTERM);
+                waitpid(g_table[i].pid, nullptr, 0);
+                releaseAllResources(i);
+                clearPCB(i);
+                activeChildren--;
+            }
+        }
+    }
+}
+
+
 static int pickRunnableProcess() {
     for (int i = 0; i < TABLE_SIZE; i++) {
         if (g_table[i].occupied && !g_table[i].blocked) {
@@ -595,6 +615,8 @@ int main(int argc, char* argv[]) {
         tryUnblockProcesses();
 
         addToClock(CLOCK_INCREMENT_NS);
+
+	reapExpiredBlockedProcesses(activeChildren);
 
         int picked = pickRunnableProcess();
         if (picked != -1) {
