@@ -29,7 +29,7 @@ struct PCB {
     int blocked;                    
     int requestedResource;          
     int resourcesAllocated[NUM_RESOURCES];
-    int pendingGrants;
+    int pendingGrant;
 };
 
 struct Message {
