@@ -235,23 +235,17 @@ static void tryUnblockProcesses() {
         if (g_table[i].occupied && g_table[i].blocked) {
             int r = g_table[i].requestedResource;
             if (r >= 0 && r < NUM_RESOURCES && g_available[r] > 0) {
-                grantResource(i, r);
 
-                Message msg;
-                msg.mtype = g_table[i].pid;
-                msg.index = i;
-                msg.action = 999;   // wake token / run token
-                msg.granted = r;    // tell worker this blocked request was granted
+                grantResource(i, r);				// Grant the resource that was blocking this process
 
-                if (msgsnd(g_msgid, &msg, sizeof(Message) - sizeof(long), 0) == -1) {
-                    cerr << "OSS: msgsnd unblock failed: " << strerror(errno) << "\n";
-                    cleanup();
-                    exit(1);
-                }
-
+                g_table[i].blocked           = 0;
+                g_table[i].requestedResource = -1;
+                g_table[i].pendingGrant      = r;
+ 
                 if (g_verbose) {
                     logBoth("Master unblocking P%d and granting R%d at time %u:%u\n",
-                            g_table[i].localPid, r, g_clk->seconds, g_clk->nanoseconds);
+                            g_table[i].localPid, r,
+                            g_clk->seconds, g_clk->nanoseconds);
                 }
             }
         }
