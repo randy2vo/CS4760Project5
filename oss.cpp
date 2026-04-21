@@ -70,13 +70,6 @@ static bool timeGTE(unsigned int sA, unsigned int nA,
     return (sA > sB) || (sA == sB && nA >= nB);
 }
 
-static void addTimeToPair(unsigned int baseS, unsigned int baseNS,
-                          unsigned int addNS,
-                          unsigned int& outS, unsigned int& outNS) {
-    unsigned long long total = (unsigned long long)baseNS + addNS;
-    outS = baseS + (unsigned int)(total / BILLION);
-    outNS = (unsigned int)(total % BILLION);
-}
 
 static void cleanup() {
     for (int i = 0; i < TABLE_SIZE; i++) {
