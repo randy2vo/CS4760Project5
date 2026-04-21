@@ -135,6 +135,7 @@ static void clearPCB(int i) {
     g_table[i].endSeconds = 0;
     g_table[i].endNano = 0;
     g_table[i].blocked = 0;
+    g_table[i].pendingGrant = -1;
     g_table[i].requestedResource = -1;
     for (int r = 0; r < NUM_RESOURCES; r++) {
         g_table[i].resourcesAllocated[r] = 0;
