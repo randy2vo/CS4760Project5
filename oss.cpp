@@ -135,8 +135,8 @@ static void clearPCB(int i) {
     g_table[i].endSeconds = 0;
     g_table[i].endNano = 0;
     g_table[i].blocked = 0;
-    g_table[i].pendingGrant = -1;
     g_table[i].requestedResource = -1;
+    g_table[i].pendingGrant = -1;
     for (int r = 0; r < NUM_RESOURCES; r++) {
         g_table[i].resourcesAllocated[r] = 0;
     }
@@ -236,13 +236,12 @@ static void tryUnblockProcesses() {
         if (g_table[i].occupied && g_table[i].blocked) {
             int r = g_table[i].requestedResource;
             if (r >= 0 && r < NUM_RESOURCES && g_available[r] > 0) {
+                grantResource(i, r);
 
-                grantResource(i, r);				// Grant the resource that was blocking this process
-
-                g_table[i].blocked           = 0;
+                g_table[i].blocked = 0;
                 g_table[i].requestedResource = -1;
-                g_table[i].pendingGrant      = r;
- 
+                g_table[i].pendingGrant = r;
+
                 if (g_verbose) {
                     logBoth("Master unblocking P%d and granting R%d at time %u:%u\n",
                             g_table[i].localPid, r,
@@ -463,6 +462,7 @@ int main(int argc, char* argv[]) {
     memset(g_table, 0, sizeof(g_table));
     for (int i = 0; i < TABLE_SIZE; i++) {
         g_table[i].requestedResource = -1;
+        g_table[i].pendingGrant = -1;
     }
 
     for (int r = 0; r < NUM_RESOURCES; r++) {
@@ -536,6 +536,7 @@ int main(int argc, char* argv[]) {
                     g_table[slot].endNano = endNS;
                     g_table[slot].blocked = 0;
                     g_table[slot].requestedResource = -1;
+                    g_table[slot].pendingGrant = -1;
                     for (int r = 0; r < NUM_RESOURCES; r++) {
                         g_table[slot].resourcesAllocated[r] = 0;
                     }
@@ -570,20 +571,19 @@ int main(int argc, char* argv[]) {
             Message msg;
             msg.mtype = g_table[picked].pid;
             msg.index = picked;
-            msg.action = 999;   // permission to run / act
+            msg.action = 999;
             msg.granted = -1;
 
             if (g_table[picked].pendingGrant >= 0) {
                 msg.granted = g_table[picked].pendingGrant;
                 g_table[picked].pendingGrant = -1;
             }
- 
+
             if (msgsnd(g_msgid, &msg, sizeof(Message) - sizeof(long), 0) == -1) {
                 cerr << "OSS: msgsnd dispatch failed: " << strerror(errno) << "\n";
                 cleanup();
                 return 1;
             }
-
 
             Message reply;
             if (msgrcv(g_msgid, &reply, sizeof(Message) - sizeof(long), 1, 0) == -1) {
@@ -603,6 +603,14 @@ int main(int argc, char* argv[]) {
                     logBoth("Master has detected Process P%d requesting R%d at time %u:%u\n",
                             g_table[i].localPid, r, g_clk->seconds, g_clk->nanoseconds);
                 }
+
+                if (grantResource(i, r)) {
+                    g_immediateGrants++;
+
+                    if (g_verbose) {
+                        logBoth("Master granting P%d request for R%d at time %u:%u\n",
+                                g_table[i].localPid, r, g_clk->seconds, g_clk->nanoseconds);
+                    }
 
                     if (g_immediateGrants % 20 == 0) {
                         logBoth("--- Allocation table after %d grants ---\n", g_immediateGrants);
